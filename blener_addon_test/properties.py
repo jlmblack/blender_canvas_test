@@ -8,8 +8,8 @@ class BLENERADDONTEST_PG_canvas(bpy.types.PropertyGroup):
         name="対象プレーン",
         type=bpy.types.Object,
     )
-    texture_width: bpy.props.IntProperty(name="幅", default=1024, min=64, max=4096)
-    texture_height: bpy.props.IntProperty(name="高さ", default=1024, min=64, max=4096)
+    texture_width: bpy.props.IntProperty(name="幅", default=1920, min=64, max=4096)
+    texture_height: bpy.props.IntProperty(name="高さ", default=1080, min=64, max=4096)
 
 
 class BLENERADDONTEST_PG_brush(bpy.types.PropertyGroup):

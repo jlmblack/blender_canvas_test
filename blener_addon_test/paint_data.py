@@ -15,6 +15,7 @@ _IMAGE_PREFIX = "BlenerPaint_"
 _GPU_FPS = 30.0
 _LAYER_CACHE: dict[str, "PaintPixelLayer"] = {}
 _STROKE_STATE = None
+_DEFAULT_BG_RGBA = (255, 255, 255, 10)
 
 
 # --- Pixel buffer ---
@@ -30,13 +31,13 @@ class PixelBuffer:
         self.height = height
         self.pixels = np.zeros((height, width, 4), dtype=np.uint8)
         if clear:
-            self.pixels[..., 3] = 255
+            self.pixels[:] = _DEFAULT_BG_RGBA
         self._dirty = False
         self._dirty_rect = None
         if clear:
             self.mark_dirty_full()
 
-    def clear(self, rgba=(0, 0, 0, 255)) -> None:
+    def clear(self, rgba=_DEFAULT_BG_RGBA) -> None:
         # バッファ全体を指定色でクリアする。
         self.pixels[:] = rgba
         self.mark_dirty_full()
@@ -122,7 +123,9 @@ def _blend_src_over(dst: np.ndarray, coverage: np.ndarray, src: np.ndarray) -> N
     dst[active] = np.clip(np.round(out), 0, 255).astype(np.uint8)
 
 
-def _blend_src_over_base(base: np.ndarray, dst: np.ndarray, coverage: np.ndarray, src: np.ndarray) -> None:
+def _blend_src_over_base(
+    base: np.ndarray, dst: np.ndarray, coverage: np.ndarray, src: np.ndarray
+) -> None:
     # base を背景として、coverage(0..1)付き src を再合成して dst に反映する。
     cov = np.clip(coverage.astype(np.float32), 0.0, 1.0)
     src_a = float(src[3]) / 255.0
@@ -230,7 +233,9 @@ class _StrokeState:
     def __init__(self, layer, src, radius, hardness):
         self.layer = layer
         self.base_pixels = layer.buffer.pixels.copy()
-        self.mask = np.zeros((layer.buffer.height, layer.buffer.width), dtype=np.float32)
+        self.mask = np.zeros(
+            (layer.buffer.height, layer.buffer.width), dtype=np.float32
+        )
         self.src = src
         self.radius = radius
         self.hardness = hardness
@@ -298,14 +303,18 @@ def end_paint_stroke() -> None:
     _STROKE_STATE = None
 
 
-def paint_stroke_uv(buffer: PixelBuffer, uv_points, color_rgba, radius_px, hardness=1.0) -> None:
+def paint_stroke_uv(
+    buffer: PixelBuffer, uv_points, color_rgba, radius_px, hardness=1.0
+) -> None:
     # UV 点列をピクセル座標へ変換し、ストロークを描画する。
     if not uv_points:
         return
     w, h = buffer.width, buffer.height
     px = [uv_to_pixel(uv, w, h) for uv in uv_points]
     if len(px) == 1:
-        _stamp_disc(buffer, px[0][0], px[0][1], radius_px, color_rgba, hardness=hardness)
+        _stamp_disc(
+            buffer, px[0][0], px[0][1], radius_px, color_rgba, hardness=hardness
+        )
         return
     for (xa, ya), (xb, yb) in zip(px[:-1], px[1:]):
         _paint_segment(buffer, xa, ya, xb, yb, color_rgba, radius_px, hardness=hardness)
@@ -331,7 +340,14 @@ def _apply_colorspace(image: bpy.types.Image) -> None:
 
 class PaintPixelLayer:
     # PixelBuffer と Blender Image / GPUTexture の同期を担う層。
-    __slots__ = ("buffer", "image", "_gpu_texture", "_gpu_size", "_flip_cache", "_last_upload")
+    __slots__ = (
+        "buffer",
+        "image",
+        "_gpu_texture",
+        "_gpu_size",
+        "_flip_cache",
+        "_last_upload",
+    )
 
     def __init__(self, image, buffer):
         # 画像とバッファのペアを保持し、GPU キャッシュを初期化する。
@@ -346,7 +362,9 @@ class PaintPixelLayer:
     def create(cls, scene, width, height):
         # シーン用画像を作成/取得して新規レイヤーを作る。
         name = _image_name(scene)
-        image = bpy.data.images.get(name) or bpy.data.images.new(name, width, height, alpha=True)
+        image = bpy.data.images.get(name) or bpy.data.images.new(
+            name, width, height, alpha=True
+        )
         if int(image.size[0]) != width or int(image.size[1]) != height:
             image.scale(width, height)
         _apply_colorspace(image)
@@ -377,7 +395,9 @@ class PaintPixelLayer:
         w, h = self.buffer.width, self.buffer.height
         if len(self.image.pixels) != w * h * 4:
             self.image.scale(w, h)
-        flat = np.ascontiguousarray(np.flipud(self.buffer.pixels).astype(np.float32) / 255.0).reshape(-1)
+        flat = np.ascontiguousarray(
+            np.flipud(self.buffer.pixels).astype(np.float32) / 255.0
+        ).reshape(-1)
         self.image.pixels.foreach_set(flat)
         self.image.update()
         self._gpu_texture = None
@@ -464,7 +484,9 @@ def paint_segment(context, uv_from, uv_to, color_rgba, radius_px, hardness=1.0) 
     color = tuple(int(round(max(0.0, min(1.0, c)) * 255.0)) for c in color_rgba[:4])
     if len(color) == 3:
         color = (*color, 255)
-    paint_stroke_uv(layer.buffer, [uv_from, uv_to], color, max(1, radius_px), hardness=hardness)
+    paint_stroke_uv(
+        layer.buffer, [uv_from, uv_to], color, max(1, radius_px), hardness=hardness
+    )
     layer.invalidate_gpu()
 
 
