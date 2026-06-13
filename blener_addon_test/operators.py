@@ -35,7 +35,7 @@ class BLENERADDONTEST_OT_create_canvas(bpy.types.Operator):
         bpy.ops.mesh.primitive_plane_add(size=self.plane_size, enter_editmode=False)
         plane = context.active_object
         plane.name = "PaintCanvas"
-        plane.hide_viewport = True
+        plane.hide_viewport = False
         tex_w = max(1, int(session.canvas.texture_width))
         tex_h = max(1, int(session.canvas.texture_height))
         aspect = tex_w / tex_h

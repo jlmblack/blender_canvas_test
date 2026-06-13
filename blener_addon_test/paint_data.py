@@ -12,10 +12,39 @@ from mathutils import Vector
 from .properties import get_session
 
 _IMAGE_PREFIX = "BlenerPaint_"
-_GPU_FPS = 30.0
+_GPU_FPS = 60.0
+_FPS_LOG_INTERVAL_SEC = 3.0
 _LAYER_CACHE: dict[str, "PaintPixelLayer"] = {}
 _STROKE_STATE = None
 _DEFAULT_BG_RGBA = (255, 255, 255, 10)
+_UPLOAD_FPS_WINDOW_START = 0.0
+_UPLOAD_FPS_WINDOW_COUNT = 0
+_PATCH_UPLOAD_SHADER = None
+
+
+def _get_patch_upload_shader():
+    # dirty 矩形テクスチャを既存 GPUTexture へ書き戻す compute shader を返す。
+    global _PATCH_UPLOAD_SHADER
+    if _PATCH_UPLOAD_SHADER is not None:
+        return _PATCH_UPLOAD_SHADER
+
+    info = gpu.types.GPUShaderCreateInfo()
+    info.sampler(0, "FLOAT_2D", "img_patch")
+    info.image(0, "RGBA32F", "FLOAT_2D", "img_output", qualifiers={"WRITE"})
+    info.push_constant("IVEC2", "dst_offset")
+    info.local_group_size(8, 8)
+    info.compute_source(
+        "void main() {"
+        "  ivec2 gid = ivec2(gl_GlobalInvocationID.xy);"
+        "  ivec2 patch_size = textureSize(img_patch, 0);"
+        "  if (gid.x >= patch_size.x || gid.y >= patch_size.y) { return; }"
+        "  vec4 px = texelFetch(img_patch, gid, 0);"
+        "  imageStore(img_output, gid + dst_offset, px);"
+        "}"
+    )
+    _PATCH_UPLOAD_SHADER = gpu.shader.create_from_info(info)
+    del info
+    return _PATCH_UPLOAD_SHADER
 
 
 # --- Pixel buffer ---
@@ -407,15 +436,9 @@ class PaintPixelLayer:
         # 次回アップロードのために CPU→GPU 変換キャッシュを無効化する。
         self._flip_cache = None
 
-    def upload_gpu(self, *, force=False, interactive=False) -> None:
-        # dirty 状態や FPS 制限を考慮して GPU テクスチャを更新する。
+    def _upload_gpu_full(self) -> None:
+        # バッファ全体を GPUTexture として再作成する。
         w, h = self.buffer.width, self.buffer.height
-        dirty = self.buffer.has_dirty() or self.buffer.peek_dirty_rect() is not None
-        if not force and not dirty and self._gpu_texture and self._gpu_size == (w, h):
-            return
-        if interactive and not force and self._gpu_texture:
-            if time.monotonic() - self._last_upload < 1.0 / _GPU_FPS:
-                return
         if self._flip_cache is None:
             self._flip_cache = np.ascontiguousarray(
                 np.flipud(self.buffer.pixels).astype(np.float32) / 255.0
@@ -423,7 +446,76 @@ class PaintPixelLayer:
         buf = gpu.types.Buffer("FLOAT", w * h * 4, self._flip_cache)
         self._gpu_texture = gpu.types.GPUTexture((w, h), format="RGBA32F", data=buf)
         self._gpu_size = (w, h)
+
+    def _upload_gpu_dirty_rect(self, rect) -> None:
+        # dirty 矩形のみを小テクスチャとして GPU へ差分転送する。
+        if self._gpu_texture is None:
+            self._upload_gpu_full()
+            return
+
+        x0, y0, x1, y1 = rect
+        w = x1 - x0 + 1
+        h = y1 - y0 + 1
+        if w <= 0 or h <= 0:
+            return
+
+        patch = np.ascontiguousarray(
+            np.flipud(self.buffer.pixels[y0 : y1 + 1, x0 : x1 + 1]).astype(np.float32)
+            / 255.0
+        )
+        patch_buf = gpu.types.Buffer("FLOAT", w * h * 4, patch)
+        patch_tex = gpu.types.GPUTexture((w, h), format="RGBA32F", data=patch_buf)
+
+        dst_y = self.buffer.height - 1 - y1
+        shader = _get_patch_upload_shader()
+        shader.image("img_output", self._gpu_texture)
+        shader.uniform_sampler("img_patch", patch_tex)
+        shader.uniform_int("dst_offset", (x0, dst_y))
+        gpu.compute.dispatch(shader, (w + 7) // 8, (h + 7) // 8, 1)
+
+    def upload_gpu(self, *, force=False, interactive=False) -> None:
+        # dirty 状態や FPS 制限を考慮して GPU テクスチャを更新する。
+        global _UPLOAD_FPS_WINDOW_START, _UPLOAD_FPS_WINDOW_COUNT
+        w, h = self.buffer.width, self.buffer.height
+        dirty_rect = self.buffer.peek_dirty_rect()
+        dirty = self.buffer.has_dirty() or dirty_rect is not None
+        if not force and not dirty and self._gpu_texture and self._gpu_size == (w, h):
+            return
+        if interactive and not force and self._gpu_texture:
+            if time.monotonic() - self._last_upload < 1.0 / _GPU_FPS:
+                return
+
+        needs_full = (
+            force
+            or self._gpu_texture is None
+            or self._gpu_size != (w, h)
+            or dirty_rect is None
+        )
+        if needs_full:
+            self._upload_gpu_full()
+        else:
+            try:
+                self._upload_gpu_dirty_rect(dirty_rect)
+            except Exception:
+                # 差分転送が使えない環境では全体アップロードへフォールバックする。
+                self._upload_gpu_full()
+
         self._last_upload = time.monotonic()
+        if interactive:
+            now = self._last_upload
+            if _UPLOAD_FPS_WINDOW_START <= 0.0:
+                _UPLOAD_FPS_WINDOW_START = now
+                _UPLOAD_FPS_WINDOW_COUNT = 0
+            _UPLOAD_FPS_WINDOW_COUNT += 1
+            elapsed = now - _UPLOAD_FPS_WINDOW_START
+            if elapsed >= _FPS_LOG_INTERVAL_SEC:
+                fps = _UPLOAD_FPS_WINDOW_COUNT / max(elapsed, 1e-6)
+                print(
+                    f"[Paint Canvas] interactive GPU upload FPS: {fps:.1f} "
+                    f"({_UPLOAD_FPS_WINDOW_COUNT} uploads / {elapsed:.1f}s)"
+                )
+                _UPLOAD_FPS_WINDOW_START = now
+                _UPLOAD_FPS_WINDOW_COUNT = 0
         if dirty:
             self.buffer.consume_dirty_rect()
 
