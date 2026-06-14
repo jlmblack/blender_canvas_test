@@ -35,7 +35,6 @@ class BLENERADDONTEST_OT_create_canvas(bpy.types.Operator):
         bpy.ops.mesh.primitive_plane_add(size=self.plane_size, enter_editmode=False)
         plane = context.active_object
         plane.name = "PaintCanvas"
-        plane.hide_viewport = False
         tex_w = max(1, int(session.canvas.texture_width))
         tex_h = max(1, int(session.canvas.texture_height))
         aspect = tex_w / tex_h
@@ -43,6 +42,14 @@ class BLENERADDONTEST_OT_create_canvas(bpy.types.Operator):
             plane.scale = (aspect, 1.0, 1.0)
         else:
             plane.scale = (1.0, 1.0 / aspect, 1.0)
+        context.view_layer.update()
+        sx, sy, sz = (float(v) for v in plane.matrix_world.to_scale())
+        print(
+            f"[AspectDebug:create_canvas] tex={tex_w}x{tex_h} aspect={aspect:.6f} "
+            f"matrix_world_scale=({sx:.6f}, {sy:.6f}, {sz:.6f}) "
+            f"matrix_ratio={(sx / sy) if abs(sy) > 1e-12 else float('inf'):.6f}"
+        )
+        plane.hide_viewport = True
         session.canvas.target_object = plane
         layer = get_pixel_layer(context)
         session.document.paint_image = layer.image
@@ -96,15 +103,18 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         session = get_session(context)
         brush = session.brush
         canvas = session.canvas
+        in_window_region = self._is_in_view3d_window_region(context, event)
 
         if event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
             return self._finish(context, {"FINISHED"})
 
-        if event.type == "F" and event.value == "PRESS":
+        if event.type == "F" and event.value == "PRESS" and in_window_region:
             self._focus_view_to_canvas(context)
             return {"RUNNING_MODAL"}
 
         if event.type == "MIDDLEMOUSE":
+            if not in_window_region:
+                return {"PASS_THROUGH"}
             if event.value == "PRESS":
                 self._panning = True
                 self._pan_last = (event.mouse_region_x, event.mouse_region_y)
@@ -145,15 +155,19 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
 
         if event.type == "LEFTMOUSE":
             if event.value == "PRESS":
-                self._drawing = True
+                if not in_window_region:
+                    return {"PASS_THROUGH"}
                 self._last_uv = self._hit_uv(event)
                 if self._last_uv is not None:
+                    self._drawing = True
                     self._stroke_active = begin_paint_stroke(
                         context, brush.color, int(brush.width), hardness=brush.hardness
                     )
                     if self._stroke_active:
                         paint_stroke_dab(context, self._last_uv)
                     context.area.tag_redraw()
+                else:
+                    return {"PASS_THROUGH"}
             elif event.value == "RELEASE":
                 self._drawing = False
                 if self._stroke_active:
@@ -224,6 +238,23 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         p1 = uv_to_pixel(uv, width, height)
         return (Vector(p0) - Vector(p1)).length >= spacing_px
 
+    @staticmethod
+    def _is_in_view3d_window_region(context, event):
+        # UI パネル上のクリックは奪わず、3D 描画領域内イベントのみ処理する。
+        area = context.area
+        if area is None:
+            return False
+        mx = int(event.mouse_x)
+        my = int(event.mouse_y)
+        for region in area.regions:
+            if region.type != "WINDOW":
+                continue
+            if region.x <= mx < (region.x + region.width) and region.y <= my < (
+                region.y + region.height
+            ):
+                return True
+        return False
+
     def _focus_view_to_canvas(self, context, *, reset_zoom=True):
         # 現在のキャンバスを法線の逆向きから真正面に見る姿勢へ合わせる。
         session = get_session(context)
@@ -247,16 +278,21 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         session = get_session(context)
         obj = session.canvas.target_object
         if obj is None:
+            print(
+                "[AspectDebug:operators._apply_canvas_aspect] skip (target object is None)"
+            )
             return
         image = session.document.paint_image
         if image is not None and len(image.size) >= 2 and int(image.size[1]) > 0:
             tex_w = max(1, int(image.size[0]))
             tex_h = max(1, int(image.size[1]))
+            source = "image"
         else:
             tex_w = max(1, int(session.canvas.texture_width))
             tex_h = max(1, int(session.canvas.texture_height))
+            source = "session.canvas"
         aspect = tex_w / tex_h
-        sx, sy, sz = obj.scale
+        sx, sy, sz = (float(v) for v in obj.scale)
         sign_x = -1.0 if sx < 0.0 else 1.0
         sign_y = -1.0 if sy < 0.0 else 1.0
         base_area = max(abs(sx * sy), 1e-12)
@@ -264,6 +300,8 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         new_x = (base_area**0.5) * root_aspect
         new_y = (base_area**0.5) / root_aspect
         obj.scale = (sign_x * new_x, sign_y * new_y, sz)
+        if getattr(context, "view_layer", None) is not None:
+            context.view_layer.update()
 
 
 class BLENERADDONTEST_OT_clear_paint(bpy.types.Operator):

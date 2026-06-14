@@ -22,6 +22,43 @@ _UPLOAD_FPS_WINDOW_COUNT = 0
 _PATCH_UPLOAD_SHADER = None
 
 
+def _apply_target_object_aspect(
+    session, tex_w: int, tex_h: int, *, source: str = "unknown", context=None
+) -> None:
+    # 対象プレーンの XY 比をテクスチャ解像度比へ合わせる。
+    obj = session.canvas.target_object
+    if obj is None:
+        print(f"[AspectDebug:{source}] skip (target object is None)")
+        return
+    if tex_h <= 0:
+        print(f"[AspectDebug:{source}] skip (invalid height: tex_h={tex_h})")
+        return
+    aspect = max(float(tex_w), 1.0) / float(tex_h)
+    sx, sy, sz = (float(v) for v in obj.scale)
+    sign_x = -1.0 if sx < 0.0 else 1.0
+    sign_y = -1.0 if sy < 0.0 else 1.0
+    base_area = max(abs(sx * sy), 1e-12)
+    root_aspect = aspect**0.5
+    new_x = (base_area**0.5) * root_aspect
+    new_y = (base_area**0.5) / root_aspect
+    before_ratio = (sx / sy) if abs(sy) > 1e-12 else float("inf")
+    after_ratio = (new_x / new_y) if abs(new_y) > 1e-12 else float("inf")
+    print(
+        f"[AspectDebug:{source}] tex={int(tex_w)}x{int(tex_h)} aspect={aspect:.6f} "
+        f"before_scale=({sx:.6f}, {sy:.6f}, {sz:.6f}) before_ratio={before_ratio:.6f} "
+        f"after_scale=({sign_x * new_x:.6f}, {sign_y * new_y:.6f}, {sz:.6f}) "
+        f"after_ratio={after_ratio:.6f}"
+    )
+    obj.scale = (sign_x * new_x, sign_y * new_y, sz)
+    if context is not None and getattr(context, "view_layer", None) is not None:
+        context.view_layer.update()
+    mx, my, mz = (float(v) for v in obj.matrix_world.to_scale())
+    print(
+        f"[AspectDebug:{source}] matrix_world_scale=({mx:.6f}, {my:.6f}, {mz:.6f}) "
+        f"matrix_ratio={(mx / my) if abs(my) > 1e-12 else float('inf'):.6f}"
+    )
+
+
 def _get_patch_upload_shader():
     # dirty 矩形テクスチャを既存 GPUTexture へ書き戻す compute shader を返す。
     global _PATCH_UPLOAD_SHADER
@@ -261,10 +298,7 @@ class _StrokeState:
 
     def __init__(self, layer, src, radius, hardness):
         self.layer = layer
-        self.base_pixels = layer.buffer.pixels.copy()
-        self.mask = np.zeros(
-            (layer.buffer.height, layer.buffer.width), dtype=np.float32
-        )
+        self.base_pixels, self.mask = layer.prepare_stroke_buffers()
         self.src = src
         self.radius = radius
         self.hardness = hardness
@@ -376,6 +410,9 @@ class PaintPixelLayer:
         "_gpu_size",
         "_flip_cache",
         "_last_upload",
+        "_patch_float_storage",
+        "_stroke_base_pixels",
+        "_stroke_mask",
     )
 
     def __init__(self, image, buffer):
@@ -386,6 +423,43 @@ class PaintPixelLayer:
         self._gpu_size = (0, 0)
         self._flip_cache = None
         self._last_upload = 0.0
+        # 最大キャンバスサイズ分を先に確保し、毎フレームの再確保を避ける。
+        self._patch_float_storage = None
+        self._stroke_base_pixels = None
+        self._stroke_mask = None
+        self._ensure_cpu_work_buffers()
+
+    def _ensure_cpu_work_buffers(self) -> None:
+        # キャンバス解像度に対応した CPU 作業用バッファを確保する。
+        w, h = self.buffer.width, self.buffer.height
+        pixel_count = w * h
+        if (
+            self._patch_float_storage is None
+            or self._patch_float_storage.size != pixel_count * 4
+        ):
+            # dirty rect 用 patch はこの 1 本の連続メモリ先頭を切り出して使い回す。
+            self._patch_float_storage = np.empty(pixel_count * 4, dtype=np.float32)
+        if (
+            self._stroke_base_pixels is None
+            or self._stroke_base_pixels.shape[0] != h
+            or self._stroke_base_pixels.shape[1] != w
+        ):
+            # ストローク開始時に毎回 new せず、基準画像コピー先を再利用する。
+            self._stroke_base_pixels = np.empty((h, w, 4), dtype=np.uint8)
+        if (
+            self._stroke_mask is None
+            or self._stroke_mask.shape[0] != h
+            or self._stroke_mask.shape[1] != w
+        ):
+            # ストローク中の max マスクも同様に固定バッファを再利用する。
+            self._stroke_mask = np.empty((h, w), dtype=np.float32)
+
+    def prepare_stroke_buffers(self):
+        # ストローク用のベース画像とマスクを再利用バッファ上で初期化する。
+        self._ensure_cpu_work_buffers()
+        np.copyto(self._stroke_base_pixels, self.buffer.pixels)
+        self._stroke_mask.fill(0.0)
+        return self._stroke_base_pixels, self._stroke_mask
 
     @classmethod
     def create(cls, scene, width, height):
@@ -459,10 +533,16 @@ class PaintPixelLayer:
         if w <= 0 or h <= 0:
             return
 
-        patch = np.ascontiguousarray(
-            np.flipud(self.buffer.pixels[y0 : y1 + 1, x0 : x1 + 1]).astype(np.float32)
-            / 255.0
+        self._ensure_cpu_work_buffers()
+        # 連続領域(_patch_float_storage)の先頭だけを (h, w, 4) view として使う。
+        patch = np.ndarray(
+            (h, w, 4),
+            dtype=np.float32,
+            buffer=self._patch_float_storage,
         )
+        src = self.buffer.pixels[y0 : y1 + 1, x0 : x1 + 1]
+        # uint8 -> float32 正規化を out=patch で in-place 実行（中間配列を作らない）。
+        np.multiply(src[::-1], 1.0 / 255.0, out=patch, casting="unsafe")
         patch_buf = gpu.types.Buffer("FLOAT", w * h * 4, patch)
         patch_tex = gpu.types.GPUTexture((w, h), format="RGBA32F", data=patch_buf)
 
@@ -539,6 +619,9 @@ def get_pixel_layer(context) -> PaintPixelLayer | None:
     session = get_session(context)
     scene = context.scene
     w, h = session.canvas.texture_width, session.canvas.texture_height
+    _apply_target_object_aspect(
+        session, w, h, source="paint_data.get_pixel_layer", context=context
+    )
     image = session.document.paint_image
     if image is None:
         image = bpy.data.images.get(_image_name(scene))
@@ -556,6 +639,7 @@ def get_pixel_layer(context) -> PaintPixelLayer | None:
     elif layer.buffer.width != w or layer.buffer.height != h:
         layer.image.scale(w, h)
         layer.buffer = PixelBuffer(w, h)
+        layer._ensure_cpu_work_buffers()
         layer.flush_to_image()
     return layer
 

@@ -149,6 +149,7 @@ def restore_edge_material(context):
         return None
 
     mat = ensure_edge_material(context)
+    obj.hide_viewport = True
     _render_swap_active = False
     return mat
 
