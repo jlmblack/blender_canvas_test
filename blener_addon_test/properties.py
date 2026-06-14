@@ -1,43 +1,60 @@
 import bpy
+from types import SimpleNamespace
 
 from .reload_utils import register_classes, unregister_classes
 
+_CANVAS_SIZE_DEBOUNCE_SEC = 0.18
+_CANVAS_UPDATE_TOKEN = 0
+
+
+def _apply_canvas_size_update(scene_name: str, token: int):
+    # 最後の入力だけ反映するため、古いタイマー呼び出しは破棄する。
+    global _CANVAS_UPDATE_TOKEN
+    if token != _CANVAS_UPDATE_TOKEN:
+        return None
+
+    scene = bpy.data.scenes.get(scene_name)
+    if scene is None or not hasattr(scene, "bleneraddontest"):
+        return None
+
+    session = scene.bleneraddontest
+    from .paint_data import get_pixel_layer
+    from .viewport import tag_redraw
+
+    # get_pixel_layer は context.scene だけ参照するため、最小コンテキストで呼ぶ。
+    get_pixel_layer(SimpleNamespace(scene=scene))
+
+    obj = session.canvas.target_object
+    if obj is not None and obj.type == "MESH":
+        obj.update_tag(refresh={"OBJECT"})
+        print(
+            "[AspectDebug:properties.debounced_apply] "
+            f"tex={int(session.canvas.texture_width)}x{int(session.canvas.texture_height)} "
+            f"scale=({obj.scale[0]:.6f}, {obj.scale[1]:.6f}, {obj.scale[2]:.6f})"
+        )
+    tag_redraw(bpy.context)
+    return None
+
 
 def _on_canvas_size_update(_self, context):
-    # UI 上の W/H 変更を即時にレイヤーとプレーン比率へ反映する。
+    # スライド中の連続更新を避け、入力が止まってから 1 回だけ反映する。
+    global _CANVAS_UPDATE_TOKEN
     if context is None or not hasattr(context, "scene"):
         return
     if not hasattr(context.scene, "bleneraddontest"):
         return
-    session = context.scene.bleneraddontest
-    tex_w = int(session.canvas.texture_width)
-    tex_h = int(session.canvas.texture_height)
-    print(f"[AspectDebug:properties.update] requested tex={tex_w}x{tex_h}")
-    from .paint_data import get_pixel_layer
-    from .viewport import tag_redraw
-
-    get_pixel_layer(context)
-    obj = session.canvas.target_object
-    if obj is not None and obj.type == "MESH":
-        # プロパティ更新直後の評価順差を吸収するため、依存グラフを明示更新する。
-        if getattr(context, "view_layer", None) is not None:
-            context.view_layer.update()
-        depsgraph = context.evaluated_depsgraph_get()
-        if hasattr(depsgraph, "update"):
-            depsgraph.update()
-        sx, sy, sz = (float(v) for v in obj.scale)
-        mx, my, mz = (float(v) for v in obj.matrix_world.to_scale())
-        eval_obj = obj.evaluated_get(depsgraph)
-        ex, ey, ez = (float(v) for v in eval_obj.matrix_world.to_scale())
-        print(
-            "[AspectDebug:properties.update] "
-            f"local_scale=({sx:.6f}, {sy:.6f}, {sz:.6f}) local_ratio={(sx / sy) if abs(sy) > 1e-12 else float('inf'):.6f} "
-            f"matrix_scale=({mx:.6f}, {my:.6f}, {mz:.6f}) matrix_ratio={(mx / my) if abs(my) > 1e-12 else float('inf'):.6f} "
-            f"eval_matrix_scale=({ex:.6f}, {ey:.6f}, {ez:.6f}) eval_ratio={(ex / ey) if abs(ey) > 1e-12 else float('inf'):.6f}"
-        )
-    else:
-        print("[AspectDebug:properties.update] skip matrix check (target object is None)")
-    tag_redraw(context)
+    _CANVAS_UPDATE_TOKEN += 1
+    token = _CANVAS_UPDATE_TOKEN
+    scene_name = context.scene.name
+    print(
+        f"[AspectDebug:properties.update] schedule token={token} "
+        f"tex={int(context.scene.bleneraddontest.canvas.texture_width)}x"
+        f"{int(context.scene.bleneraddontest.canvas.texture_height)}"
+    )
+    bpy.app.timers.register(
+        lambda: _apply_canvas_size_update(scene_name, token),
+        first_interval=_CANVAS_SIZE_DEBOUNCE_SEC,
+    )
 
 
 class BLENERADDONTEST_PG_canvas(bpy.types.PropertyGroup):

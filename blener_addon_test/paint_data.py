@@ -150,6 +150,27 @@ class PixelBuffer:
         buf.mark_dirty_full()
         return buf
 
+    @classmethod
+    def resized_centered(cls, src: "PixelBuffer", width: int, height: int):
+        # 既存ピクセルを中心揃えで保持しつつ、新しいサイズのバッファを作成する。
+        dst = cls(width, height, clear=True)
+
+        copy_w = min(src.width, width)
+        copy_h = min(src.height, height)
+        if copy_w <= 0 or copy_h <= 0:
+            return dst
+
+        src_x0 = (src.width - copy_w) // 2
+        src_y0 = (src.height - copy_h) // 2
+        dst_x0 = (width - copy_w) // 2
+        dst_y0 = (height - copy_h) // 2
+
+        dst.pixels[dst_y0 : dst_y0 + copy_h, dst_x0 : dst_x0 + copy_w] = src.pixels[
+            src_y0 : src_y0 + copy_h, src_x0 : src_x0 + copy_w
+        ]
+        dst.mark_dirty_full()
+        return dst
+
 
 # --- Raster brush ---
 
@@ -630,9 +651,9 @@ def get_pixel_layer(context) -> PaintPixelLayer | None:
     if layer is None:
         layer = PaintPixelLayer.from_image(image)
         _LAYER_CACHE[image.name] = layer
-    elif layer.buffer.width != w or layer.buffer.height != h:
-        layer.image.scale(w, h)
-        layer.buffer = PixelBuffer(w, h)
+    if layer.buffer.width != w or layer.buffer.height != h:
+        old_buffer = layer.buffer
+        layer.buffer = PixelBuffer.resized_centered(old_buffer, w, h)
         layer._ensure_cpu_work_buffers()
         layer.flush_to_image()
     return layer
