@@ -99,8 +99,12 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         canvas = session.canvas
         in_window_region = self._is_in_view3d_window_region(context, event)
 
-        if event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
+        if event.type == "ESC" and event.value == "PRESS":
             return self._finish(context, {"FINISHED"})
+        if event.type == "RIGHTMOUSE" and event.value == "PRESS":
+            if in_window_region:
+                return self._finish(context, {"FINISHED"})
+            return {"PASS_THROUGH"}
 
         if event.type == "F" and event.value == "PRESS" and in_window_region:
             self._focus_view_to_canvas(context)
@@ -163,6 +167,9 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
                 else:
                     return {"PASS_THROUGH"}
             elif event.value == "RELEASE":
+                if not self._drawing and not self._stroke_active:
+                    # UI クリック由来のリリースは握らず、通常 UI 操作へ渡す。
+                    return {"PASS_THROUGH"}
                 self._drawing = False
                 if self._stroke_active:
                     end_paint_stroke()
@@ -234,20 +241,21 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
 
     @staticmethod
     def _is_in_view3d_window_region(context, event):
-        # UI パネル上のクリックは奪わず、3D 描画領域内イベントのみ処理する。
+        # マウス下に UI リージョンがある場合はそちらを優先し、イベントを奪わない。
         area = context.area
         if area is None:
             return False
         mx = int(event.mouse_x)
         my = int(event.mouse_y)
+        in_window = False
         for region in area.regions:
-            if region.type != "WINDOW":
-                continue
             if region.x <= mx < (region.x + region.width) and region.y <= my < (
                 region.y + region.height
             ):
-                return True
-        return False
+                if region.type != "WINDOW":
+                    return False
+                in_window = True
+        return in_window
 
     def _focus_view_to_canvas(self, context, *, reset_zoom=True):
         # 現在のキャンバスを法線の逆向きから真正面に見る姿勢へ合わせる。
