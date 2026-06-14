@@ -72,6 +72,13 @@ class BLENERADDONTEST_PG_brush(bpy.types.PropertyGroup):
     width: bpy.props.FloatProperty(name="半径 (px)", default=3.0, min=1.0, max=20.0)
     hardness: bpy.props.FloatProperty(name="硬さ", default=1.0, min=0.0, max=1.0)
     spacing_px: bpy.props.IntProperty(name="点の間隔 (px)", default=4, min=1, max=64)
+    curve_strength: bpy.props.FloatProperty(
+        name="補間強度",
+        description="0で直線、1に近いほど3点補間で滑らかに描画",
+        default=0.55,
+        min=0.0,
+        max=1.0,
+    )
 
 
 class BLENERADDONTEST_PG_document(bpy.types.PropertyGroup):

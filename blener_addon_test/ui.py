@@ -30,6 +30,7 @@ class BLENERADDONTEST_PT_panel(bpy.types.Panel):
         box.prop(s.brush, "width")
         box.prop(s.brush, "hardness")
         box.prop(s.brush, "spacing_px")
+        box.prop(s.brush, "curve_strength")
         box = layout.box()
         box.label(text="レンダー", icon="RENDER_STILL")
         box.operator("bleneraddontest.preview_render_material", icon="MATERIAL")

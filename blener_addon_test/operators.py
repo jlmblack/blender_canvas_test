@@ -77,6 +77,8 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         self._pan_last = (0, 0)
         self._stroke_active = False
         self._last_uv = None
+        self._stroke_points = []
+        self._spline_drawn_segments = 0
         self._apply_canvas_aspect(context)
         self._focus_view_to_canvas(context, reset_zoom=True)
         get_session(context).is_painting = True
@@ -163,6 +165,8 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
                     )
                     if self._stroke_active:
                         paint_stroke_dab(context, self._last_uv)
+                    self._stroke_points = [self._last_uv]
+                    self._spline_drawn_segments = 0
                     context.area.tag_redraw()
                 else:
                     return {"PASS_THROUGH"}
@@ -172,9 +176,19 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
                     return {"PASS_THROUGH"}
                 self._drawing = False
                 if self._stroke_active:
+                    self._flush_pending_spline_segments(
+                        context,
+                        canvas.texture_width,
+                        canvas.texture_height,
+                        brush.spacing_px,
+                        brush.curve_strength,
+                        finalize=True,
+                    )
                     end_paint_stroke()
                     self._stroke_active = False
                 sync_paint(context)
+                self._stroke_points = []
+                self._spline_drawn_segments = 0
                 self._last_uv = None
             return {"RUNNING_MODAL"}
 
@@ -196,13 +210,23 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
                             hardness=brush.hardness,
                         )
                     if self._stroke_active:
-                        paint_stroke_segment(context, self._last_uv, uv)
+                        self._stroke_points.append(uv)
+                        self._flush_pending_spline_segments(
+                            context,
+                            canvas.texture_width,
+                            canvas.texture_height,
+                            brush.spacing_px,
+                            brush.curve_strength,
+                            finalize=False,
+                        )
                 else:
                     self._stroke_active = begin_paint_stroke(
                         context, brush.color, int(brush.width), hardness=brush.hardness
                     )
                     if self._stroke_active:
                         paint_stroke_dab(context, uv)
+                    self._stroke_points = [uv]
+                    self._spline_drawn_segments = 0
                 self._last_uv = uv
                 context.area.tag_redraw()
             return {"RUNNING_MODAL"}
@@ -212,10 +236,21 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
     def _finish(self, context, status):
         # 描画終了時に CPU/GPU/Image を同期し、状態を戻す。
         if getattr(self, "_stroke_active", False):
+            session = get_session(context)
+            self._flush_pending_spline_segments(
+                context,
+                session.canvas.texture_width,
+                session.canvas.texture_height,
+                session.brush.spacing_px,
+                session.brush.curve_strength,
+                finalize=True,
+            )
             end_paint_stroke()
             self._stroke_active = False
         sync_paint(context)
         get_session(context).is_painting = False
+        self._stroke_points = []
+        self._spline_drawn_segments = 0
         viewport.tag_redraw(context)
         return status
 
@@ -238,6 +273,88 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         p0 = uv_to_pixel(last_uv, width, height)
         p1 = uv_to_pixel(uv, width, height)
         return (Vector(p0) - Vector(p1)).length >= spacing_px
+
+    @staticmethod
+    def _paint_segment_with_interpolation(
+        context,
+        uv0,
+        uv1,
+        uv2,
+        uv3,
+        width,
+        height,
+        spacing_px,
+        curve_strength,
+    ):
+        # Catmull-Rom 連続曲線の 1 セグメント(uv1->uv2)を分割描画する。
+        if curve_strength <= 0.0:
+            paint_stroke_segment(context, uv1, uv2)
+            return
+
+        p0 = Vector((uv0.x, uv0.y))
+        p1 = Vector((uv1.x, uv1.y))
+        p2 = Vector((uv2.x, uv2.y))
+        p3 = Vector((uv3.x, uv3.y))
+        strength = max(0.0, min(1.0, float(curve_strength)))
+
+        # Catmull-Rom の接線を強度で調整して利用する（0で直線に近づく）。
+        m1 = (p2 - p0) * (0.5 * strength)
+        m2 = (p3 - p1) * (0.5 * strength)
+        px_scale = Vector((max(1, int(width)) - 1, max(1, int(height)) - 1))
+        poly_len_px = (
+            (Vector((p1.x * px_scale.x, p1.y * px_scale.y)) - Vector((p2.x * px_scale.x, p2.y * px_scale.y))).length
+            + (Vector((m1.x * px_scale.x, m1.y * px_scale.y)).length * 0.5)
+            + (Vector((m2.x * px_scale.x, m2.y * px_scale.y)).length * 0.5)
+        )
+        step_px = max(1.0, float(spacing_px))
+        segments = max(1, int(poly_len_px / step_px))
+
+        prev = p1
+        for i in range(1, segments + 1):
+            t = i / segments
+            t2 = t * t
+            t3 = t2 * t
+            h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+            h10 = t3 - 2.0 * t2 + t
+            h01 = -2.0 * t3 + 3.0 * t2
+            h11 = t3 - t2
+            q = (h00 * p1) + (h10 * m1) + (h01 * p2) + (h11 * m2)
+            paint_stroke_segment(context, prev, q)
+            prev = q
+
+    def _flush_pending_spline_segments(
+        self,
+        context,
+        width,
+        height,
+        spacing_px,
+        curve_strength,
+        *,
+        finalize,
+    ):
+        # 入力点列から未描画セグメントを順次確定して描画する。
+        points = self._stroke_points
+        if len(points) < 2:
+            return
+        max_draw_index = len(points) - 1 if finalize else len(points) - 2
+        while self._spline_drawn_segments < max_draw_index:
+            i = self._spline_drawn_segments
+            uv0 = points[i - 1] if i > 0 else points[i]
+            uv1 = points[i]
+            uv2 = points[i + 1]
+            uv3 = points[i + 2] if (i + 2) < len(points) else points[i + 1]
+            self._paint_segment_with_interpolation(
+                context,
+                uv0,
+                uv1,
+                uv2,
+                uv3,
+                width,
+                height,
+                spacing_px,
+                curve_strength,
+            )
+            self._spline_drawn_segments += 1
 
     @staticmethod
     def _is_in_view3d_window_region(context, event):
