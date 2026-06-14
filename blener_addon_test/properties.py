@@ -27,11 +27,6 @@ def _apply_canvas_size_update(scene_name: str, token: int):
     obj = session.canvas.target_object
     if obj is not None and obj.type == "MESH":
         obj.update_tag(refresh={"OBJECT"})
-        print(
-            "[AspectDebug:properties.debounced_apply] "
-            f"tex={int(session.canvas.texture_width)}x{int(session.canvas.texture_height)} "
-            f"scale=({obj.scale[0]:.6f}, {obj.scale[1]:.6f}, {obj.scale[2]:.6f})"
-        )
     tag_redraw(bpy.context)
     return None
 
@@ -46,11 +41,6 @@ def _on_canvas_size_update(_self, context):
     _CANVAS_UPDATE_TOKEN += 1
     token = _CANVAS_UPDATE_TOKEN
     scene_name = context.scene.name
-    print(
-        f"[AspectDebug:properties.update] schedule token={token} "
-        f"tex={int(context.scene.bleneraddontest.canvas.texture_width)}x"
-        f"{int(context.scene.bleneraddontest.canvas.texture_height)}"
-    )
     bpy.app.timers.register(
         lambda: _apply_canvas_size_update(scene_name, token),
         first_interval=_CANVAS_SIZE_DEBOUNCE_SEC,

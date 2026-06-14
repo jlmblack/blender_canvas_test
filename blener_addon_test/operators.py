@@ -43,12 +43,6 @@ class BLENERADDONTEST_OT_create_canvas(bpy.types.Operator):
         else:
             plane.scale = (1.0, 1.0 / aspect, 1.0)
         context.view_layer.update()
-        sx, sy, sz = (float(v) for v in plane.matrix_world.to_scale())
-        print(
-            f"[AspectDebug:create_canvas] tex={tex_w}x{tex_h} aspect={aspect:.6f} "
-            f"matrix_world_scale=({sx:.6f}, {sy:.6f}, {sz:.6f}) "
-            f"matrix_ratio={(sx / sy) if abs(sy) > 1e-12 else float('inf'):.6f}"
-        )
         plane.hide_viewport = True
         session.canvas.target_object = plane
         layer = get_pixel_layer(context)
@@ -278,19 +272,14 @@ class BLENERADDONTEST_OT_paint(bpy.types.Operator):
         session = get_session(context)
         obj = session.canvas.target_object
         if obj is None:
-            print(
-                "[AspectDebug:operators._apply_canvas_aspect] skip (target object is None)"
-            )
             return
         image = session.document.paint_image
         if image is not None and len(image.size) >= 2 and int(image.size[1]) > 0:
             tex_w = max(1, int(image.size[0]))
             tex_h = max(1, int(image.size[1]))
-            source = "image"
         else:
             tex_w = max(1, int(session.canvas.texture_width))
             tex_h = max(1, int(session.canvas.texture_height))
-            source = "session.canvas"
         aspect = tex_w / tex_h
         sx, sy, sz = (float(v) for v in obj.scale)
         sign_x = -1.0 if sx < 0.0 else 1.0

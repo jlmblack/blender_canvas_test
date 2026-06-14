@@ -22,14 +22,12 @@ _UPLOAD_FPS_WINDOW_COUNT = 0
 _PATCH_UPLOAD_SHADER = None
 
 
-def _apply_target_object_aspect(session, tex_w: int, tex_h: int, *, source: str = "unknown") -> None:
+def _apply_target_object_aspect(session, tex_w: int, tex_h: int) -> None:
     # 対象プレーンの XY 比をテクスチャ解像度比へ合わせる。
     obj = session.canvas.target_object
     if obj is None:
-        print(f"[AspectDebug:{source}] skip (target object is None)")
         return
     if tex_h <= 0:
-        print(f"[AspectDebug:{source}] skip (invalid height: tex_h={tex_h})")
         return
     aspect = max(float(tex_w), 1.0) / float(tex_h)
     sx, sy, sz = (float(v) for v in obj.scale)
@@ -39,18 +37,9 @@ def _apply_target_object_aspect(session, tex_w: int, tex_h: int, *, source: str 
     root_aspect = aspect**0.5
     new_x = (base_area**0.5) * root_aspect
     new_y = (base_area**0.5) / root_aspect
-    before_ratio = (sx / sy) if abs(sy) > 1e-12 else float("inf")
-    after_ratio = (new_x / new_y) if abs(new_y) > 1e-12 else float("inf")
-    print(
-        f"[AspectDebug:{source}] tex={int(tex_w)}x{int(tex_h)} aspect={aspect:.6f} "
-        f"before_scale=({sx:.6f}, {sy:.6f}, {sz:.6f}) before_ratio={before_ratio:.6f} "
-        f"after_scale=({sign_x * new_x:.6f}, {sign_y * new_y:.6f}, {sz:.6f}) "
-        f"after_ratio={after_ratio:.6f}"
-    )
     next_x = sign_x * new_x
     next_y = sign_y * new_y
     if abs(sx - next_x) <= 1e-9 and abs(sy - next_y) <= 1e-9:
-        print(f"[AspectDebug:{source}] scale unchanged")
         return
     obj.scale = (next_x, next_y, sz)
 
@@ -636,7 +625,7 @@ def get_pixel_layer(context) -> PaintPixelLayer | None:
     session = get_session(context)
     scene = context.scene
     w, h = session.canvas.texture_width, session.canvas.texture_height
-    _apply_target_object_aspect(session, w, h, source="paint_data.get_pixel_layer")
+    _apply_target_object_aspect(session, w, h)
     image = session.document.paint_image
     if image is None:
         image = bpy.data.images.get(_image_name(scene))
