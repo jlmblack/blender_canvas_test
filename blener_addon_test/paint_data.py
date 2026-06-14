@@ -22,9 +22,7 @@ _UPLOAD_FPS_WINDOW_COUNT = 0
 _PATCH_UPLOAD_SHADER = None
 
 
-def _apply_target_object_aspect(
-    session, tex_w: int, tex_h: int, *, source: str = "unknown", context=None
-) -> None:
+def _apply_target_object_aspect(session, tex_w: int, tex_h: int, *, source: str = "unknown") -> None:
     # 対象プレーンの XY 比をテクスチャ解像度比へ合わせる。
     obj = session.canvas.target_object
     if obj is None:
@@ -49,14 +47,12 @@ def _apply_target_object_aspect(
         f"after_scale=({sign_x * new_x:.6f}, {sign_y * new_y:.6f}, {sz:.6f}) "
         f"after_ratio={after_ratio:.6f}"
     )
-    obj.scale = (sign_x * new_x, sign_y * new_y, sz)
-    if context is not None and getattr(context, "view_layer", None) is not None:
-        context.view_layer.update()
-    mx, my, mz = (float(v) for v in obj.matrix_world.to_scale())
-    print(
-        f"[AspectDebug:{source}] matrix_world_scale=({mx:.6f}, {my:.6f}, {mz:.6f}) "
-        f"matrix_ratio={(mx / my) if abs(my) > 1e-12 else float('inf'):.6f}"
-    )
+    next_x = sign_x * new_x
+    next_y = sign_y * new_y
+    if abs(sx - next_x) <= 1e-9 and abs(sy - next_y) <= 1e-9:
+        print(f"[AspectDebug:{source}] scale unchanged")
+        return
+    obj.scale = (next_x, next_y, sz)
 
 
 def _get_patch_upload_shader():
@@ -619,9 +615,7 @@ def get_pixel_layer(context) -> PaintPixelLayer | None:
     session = get_session(context)
     scene = context.scene
     w, h = session.canvas.texture_width, session.canvas.texture_height
-    _apply_target_object_aspect(
-        session, w, h, source="paint_data.get_pixel_layer", context=context
-    )
+    _apply_target_object_aspect(session, w, h, source="paint_data.get_pixel_layer")
     image = session.document.paint_image
     if image is None:
         image = bpy.data.images.get(_image_name(scene))

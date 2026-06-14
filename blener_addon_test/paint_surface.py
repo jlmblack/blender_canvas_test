@@ -1,7 +1,7 @@
 """プレーン上の UV / ワールド座標変換とレイキャスト。"""
 
 from bpy_extras import view3d_utils
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 from mathutils.geometry import intersect_line_plane
 
 from .properties import get_session
@@ -25,9 +25,17 @@ class PaintSurface:
         # 対象オブジェクトのワールド行列を返し、無効時は単位行列を返す。
         obj = self.target_object
         if obj is not None and obj.type == "MESH":
-            depsgraph = self.context.evaluated_depsgraph_get()
-            eval_obj = obj.evaluated_get(depsgraph)
-            return eval_obj.matrix_world.copy()
+            # 親なしオブジェクトは TRS から直接合成し、UI 変更の即時反映を優先する。
+            if obj.parent is None:
+                if obj.rotation_mode == "QUATERNION":
+                    rot = obj.rotation_quaternion.copy()
+                elif obj.rotation_mode == "AXIS_ANGLE":
+                    angle, ax, ay, az = obj.rotation_axis_angle
+                    rot = Quaternion((ax, ay, az), angle)
+                else:
+                    rot = obj.rotation_euler.to_quaternion()
+                return Matrix.LocRotScale(obj.location.copy(), rot, obj.scale.copy())
+            return obj.matrix_world.copy()
         return Matrix.Identity(4)
 
     def is_valid(self) -> bool:
